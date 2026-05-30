@@ -1,0 +1,9 @@
+{
+  "name": "skill-creator-extension",
+  "version": "0.0.0",
+  "private": true,
+  "description": "pi extension for authoring and iterating on pi skills (local node_modules so the yaml import resolves)",
+  "dependencies": {
+    "yaml": "2.9.0"
+  }
+}

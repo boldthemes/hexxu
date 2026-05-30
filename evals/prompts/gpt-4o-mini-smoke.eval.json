@@ -1,0 +1,46 @@
+{
+  "suiteId": "gpt-4o-mini-smoke",
+  "description": "Baseline contract checks for the prompt eval harness itself.",
+  "modelId": "gpt-4o-mini",
+  "defaults": {
+    "systemPrompt": "You are a precise assistant. Follow the user's instructions exactly.",
+    "temperature": 0,
+    "maxTokens": 120,
+    "repeat": 2,
+    "passThreshold": 2,
+    "timeoutMs": 30000
+  },
+  "cases": [
+    {
+      "id": "exact-echo",
+      "description": "Simple exact-match contract.",
+      "prompt": "Reply with exactly: HEXXU_EVAL_OK",
+      "assertions": {
+        "equals": "HEXXU_EVAL_OK"
+      }
+    },
+    {
+      "id": "json-shape",
+      "description": "Structured outputs can be validated without brittle full snapshots.",
+      "prompt": "Return compact JSON only with keys verdict and reason. verdict must be \"pass\". reason must include the lowercase word \"sunshine\".",
+      "assertions": {
+        "contains": [
+          "pass",
+          "sunshine"
+        ],
+        "json": {
+          "requiredPaths": [
+            "verdict",
+            "reason"
+          ],
+          "equals": {
+            "verdict": "pass"
+          },
+          "contains": {
+            "reason": "sunshine"
+          }
+        }
+      }
+    }
+  ]
+}

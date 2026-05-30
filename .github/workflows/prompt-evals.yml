@@ -1,0 +1,38 @@
+name: Prompt evals
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prompt-evals-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prompt-evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Note when live prompt evals are skipped
+        if: env.OPENAI_API_KEY == ''
+        run: |
+          echo "OPENAI_API_KEY is not configured, so live prompt eval cases were skipped." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run prompt eval harness
+        run: bash ./.pi/sdk/prompt-evals/test.sh

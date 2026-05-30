@@ -1,0 +1,82 @@
+[
+  {
+    "query": "I want to make a pi skill that helps me convert messy meeting notes into structured action items. Can you help me put together the SKILL.md and figure out a good description?",
+    "should_trigger": true
+  },
+  {
+    "query": "the description on my pi 'data-cleanup' skill keeps getting picked up when people ask about file uploads in general — any idea how to tighten it so it only triggers for actual CSV/parquet cleanup tasks?",
+    "should_trigger": true
+  },
+  {
+    "query": "I have a pi skill at .pi/skills/sql-formatter that's pretty rough. The workflow section is huge and confusing. Can we split out the dialect-specific stuff into references/ and tighten up the main file?",
+    "should_trigger": true
+  },
+  {
+    "query": "i need to write some eval prompts for a new skill that summarizes customer support tickets — what are some realistic ones I could start with? probably want maybe 3-5 covering common and edge cases",
+    "should_trigger": true
+  },
+  {
+    "query": "we've been running iterations on .pi/skills/release-notes for a couple weeks and the latest benchmark shows it regressed vs iteration-3 on the 'multi-PR release' eval. Can you look at what changed and propose improvements to the skill?",
+    "should_trigger": true
+  },
+  {
+    "query": "Help me think through the boundaries for a skill called 'incident-postmortem' — what should it own vs leave to extensions, and what should the trigger conditions look like in the description?",
+    "should_trigger": true
+  },
+  {
+    "query": "I want to take this whole conversation we just had (where we built a CSV-to-markdown converter step by step) and turn it into a reusable pi skill",
+    "should_trigger": true
+  },
+  {
+    "query": "the .pi/skills/code-review skill is currently too aggressive — it triggers on any mention of 'review' even for slack messages and design docs. how do I make the description more discriminating without losing the real code review cases?",
+    "should_trigger": true
+  },
+  {
+    "query": "Can you draft a description field for a pi skill that helps engineers write better commit messages? Should be specific about when to use it without being too narrow",
+    "should_trigger": true
+  },
+  {
+    "query": "I'm building out a pi-test-helper skill and I need to decide what goes in SKILL.md vs references/. Right now SKILL.md is 800 lines. Help me restructure",
+    "should_trigger": true
+  },
+  {
+    "query": "Read /home/macak/.nvm/versions/node/v24.15.0/lib/node_modules/@earendil-works/pi-coding-agent/docs/skills.md so I understand how skills work in pi before I start building anything",
+    "should_trigger": false
+  },
+  {
+    "query": "I want to make a pi extension that registers a slash command for opening our internal grafana dashboards — what does the extension API look like for that?",
+    "should_trigger": false
+  },
+  {
+    "query": "Can you set up an eval harness in our repo for testing prompts we send to gpt-4o-mini directly? Right now it's just adhoc scripts and we want CI to flag regressions",
+    "should_trigger": false
+  },
+  {
+    "query": "the description on our pull-request template keeps confusing the merge bot — help me rewrite it so the bot picks up the deploy-on-merge flag correctly",
+    "should_trigger": false
+  },
+  {
+    "query": "what's the difference between pi skills and Claude Code skills? are they interchangeable or do I need to port skills between them?",
+    "should_trigger": false
+  },
+  {
+    "query": "I'm writing a YAML frontmatter parser for some markdown files in our docs site — the existing parser breaks on multi-line strings with single quotes inside them",
+    "should_trigger": false
+  },
+  {
+    "query": "iterate on this classification prompt template until it consistently sorts support tickets into urgency tiers — we're at maybe 70% accuracy and need 90+. Here's the template: ...",
+    "should_trigger": false
+  },
+  {
+    "query": "we need to optimize the description of our gcp project so cloud asset inventory picks it up correctly in our governance dashboard",
+    "should_trigger": false
+  },
+  {
+    "query": "draft me a pi prompt template for /standup that asks the model to read git log since yesterday and produce yesterday/today/blockers in our standard format",
+    "should_trigger": false
+  },
+  {
+    "query": "the workers tool team is asking how to run benchmarks comparing claude-opus-4-7 vs claude-sonnet-4-6 on our agent's task suite — what infra do we need to set up to do that cleanly?",
+    "should_trigger": false
+  }
+]

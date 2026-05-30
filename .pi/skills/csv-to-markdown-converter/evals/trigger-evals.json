@@ -1,0 +1,26 @@
+[
+  {
+    "query": "Can you help me build a small Python CLI that reads a CSV file and outputs a GitHub-flavored markdown table? It needs to handle quoted commas and include a couple tests.",
+    "should_trigger": true
+  },
+  {
+    "query": "Our Node script that converts CSV to markdown breaks when a cell contains a pipe or an embedded newline. Can you fix the renderer and add a regression test?",
+    "should_trigger": true
+  },
+  {
+    "query": "I have a CSV export and want to turn it into a markdown table for a README, but I need to rename a few headers and skip one column.",
+    "should_trigger": true
+  },
+  {
+    "query": "Can you analyze this CSV and tell me which customers spent the most last quarter?",
+    "should_trigger": false
+  },
+  {
+    "query": "Please convert this markdown table into JSON.",
+    "should_trigger": false
+  },
+  {
+    "query": "Help me polish the markdown formatting in this README section about installation.",
+    "should_trigger": false
+  }
+]

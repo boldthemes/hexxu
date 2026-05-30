@@ -1,0 +1,76 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+*.tsbuildinfo
+
+# Logs
+*.log
+tui-debug.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor
+.vscode/
+.zed/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude Code project-local skills — kept local, NOT tracked here per the
+# T12 publishing decision. The pi-skill-creator and karpathy-guidelines
+# under .claude/skills/ are workstation-local artifacts.
+.claude/
+
+# Reference material — not hexxu-authored content
+inspiration/
+
+# Upstream pi source (own .git, anyone can re-clone independently)
+pisource/
+
+# Eval working state (generated, large, regenerable)
+skill-workspaces/
+
+# Pre-existing pi-fork history, archived for reference, never tracked
+.git.pi-fork-archive/
+
+# Pi extension local node_modules (each extension manages its own)
+.pi/extensions/*/node_modules/
+
+# Pi runtime state we don't want to publish
+.pi/hf-sessions/
+.pi/hf-sessions-backup/
+.pi_config/
+
+# Hexxu local cache and telemetry (worker-machine state, not source)
+.hexxu/
+
+# Misc generated files (left over from the pi-fork era)
+packages/*/dist/
+packages/*/dist-chrome/
+packages/*/dist-firefox/
+packages/coding-agent/binaries/
+*.cpuprofile
+out.jsonl
+out.html
+syntax.jsonl
+pi-*.html
+coverage/
+.nyc_output/
+collect.sh
+# Personal todo files — root only, not nested reference docs like
+# .pi/skills/skill-creator/references/todo.md
+/todo.md
+plans/
+compaction-results/
+.opencode/
+.npm/
