@@ -27,10 +27,10 @@
  *     duration percentiles at the session level.
  *
  * Exits:
- *   0  Success
+ *   0  Success (including a window with no in-period sessions — valid empty result)
  *   1  Argument error (bad flag, unparseable --since)
  *   2  Telemetry file missing or unreadable
- *   3  Telemetry file empty (or no records match window)
+ *   3  Telemetry file empty (zero parseable records in the file)
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -98,8 +98,22 @@ function parseArgs(argv: string[]): ParsedArgs | { error: string } {
 		file: defaultFile(),
 		format: "text",
 	};
+	let endOfOptions = false;
+	const positional: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
+		// T13.17: standard convention — `--` ends option parsing. Subsequent
+		// tokens are treated as positional. The CLI currently rejects all
+		// positionals, but accepting `--` keeps the door open for future args
+		// (e.g., a file list) and matches user expectation for posix tools.
+		if (!endOfOptions && a === "--") {
+			endOfOptions = true;
+			continue;
+		}
+		if (endOfOptions) {
+			positional.push(a);
+			continue;
+		}
 		if (a === "-h" || a === "--help") {
 			printUsage(process.stdout);
 			process.exit(0);
@@ -130,6 +144,9 @@ function parseArgs(argv: string[]): ParsedArgs | { error: string } {
 				return { error: `unknown argument: ${a}` };
 		}
 	}
+	if (positional.length > 0) {
+		return { error: `unexpected positional argument(s): ${positional.join(" ")}` };
+	}
 	const sinceMs = parseDuration(args.since);
 	if (sinceMs === null) {
 		return { error: `--since must be a number followed by s/m/h/d/w (got '${args.since}')` };
@@ -137,7 +154,12 @@ function parseArgs(argv: string[]): ParsedArgs | { error: string } {
 	return { ...args, sinceMs };
 }
 
-function readRecords(file: string): TelemetryRecord[] | { error: string; code: number } {
+interface ReadResult {
+	records: TelemetryRecord[];
+	skipped: number;
+}
+
+function readRecords(file: string): ReadResult | { error: string; code: number } {
 	if (!existsSync(file)) {
 		return { error: `telemetry file not found: ${file}`, code: 2 };
 	}
@@ -148,10 +170,8 @@ function readRecords(file: string): TelemetryRecord[] | { error: string; code: n
 		return { error: `cannot read ${file}: ${e instanceof Error ? e.message : String(e)}`, code: 2 };
 	}
 	const records: TelemetryRecord[] = [];
-	let lineNo = 0;
 	let skipped = 0;
 	for (const line of raw.split("\n")) {
-		lineNo++;
 		const t = line.trim();
 		if (!t) continue;
 		try {
@@ -167,9 +187,11 @@ function readRecords(file: string): TelemetryRecord[] | { error: string; code: n
 		}
 	}
 	if (skipped > 0) {
+		// T13.18: surface skip count to stderr so ops sees sampling bias signal
+		// even when stdout consumers parse the JSON/text output blindly.
 		process.stderr.write(`[warn] skipped ${skipped} malformed line(s) in ${file}\n`);
 	}
-	return records;
+	return { records, skipped };
 }
 
 function percentile(sorted: number[], p: number): number {
@@ -195,12 +217,14 @@ interface Summary {
 	source: string;
 	sessions_in_period: number;
 	sessions_total_in_file: number;
+	// T13.18: surface skipped-record count so json consumers see sampling bias
+	skipped_malformed_records: number;
 	skills: Array<{ name: string; invocations: number; versions: string[] }>;
 	exit_reasons: Record<string, number>;
 	duration_ms: { p50: number; p99: number; mean: number; total: number };
 }
 
-function summarize(records: TelemetryRecord[], args: ParsedArgs): Summary {
+function summarize(records: TelemetryRecord[], skipped: number, args: ParsedArgs): Summary {
 	const now = Date.now();
 	const sinceMs = now - args.sinceMs;
 	const sinceIso = new Date(sinceMs).toISOString();
@@ -247,6 +271,7 @@ function summarize(records: TelemetryRecord[], args: ParsedArgs): Summary {
 		source: args.file,
 		sessions_in_period: inWindow.length,
 		sessions_total_in_file: records.length,
+		skipped_malformed_records: skipped,
 		skills,
 		exit_reasons: exitReasons,
 		duration_ms: {
@@ -265,6 +290,12 @@ function renderText(s: Summary): string {
 	lines.push(`Period: ${s.period.since_iso} → ${s.period.until_iso} (window: ${s.period.window})`);
 	lines.push(`Source: ${s.source}`);
 	lines.push(`Sessions in period: ${s.sessions_in_period}  (file total: ${s.sessions_total_in_file})`);
+	// T13.18: sampling bias notice
+	if (s.skipped_malformed_records > 0) {
+		lines.push(
+			`Sampling notice: ${s.skipped_malformed_records} record(s) were skipped due to malformed JSON; numbers below exclude them.`,
+		);
+	}
 	lines.push("");
 	lines.push("Skills invoked (by count):");
 	if (s.skills.length === 0) {
@@ -311,12 +342,12 @@ function main(): number {
 	}
 
 	const result = readRecords(parsed.file);
-	if (!Array.isArray(result)) {
+	if ("error" in result) {
 		process.stderr.write(`error: ${result.error}\n`);
 		return result.code;
 	}
 
-	const summary = summarize(result, parsed);
+	const summary = summarize(result.records, result.skipped, parsed);
 	if (summary.sessions_total_in_file === 0) {
 		process.stderr.write(`no telemetry records in ${parsed.file}\n`);
 		return 3;

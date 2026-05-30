@@ -78,6 +78,16 @@ skip() { printf "  \033[33m- SKIP\033[0m  %s\n" "$1"; SKIP=$((SKIP+1)); }
 header() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 sub() { [ "$VERBOSE" = "1" ] && printf "    %s\n" "$1" || true; }
 
+# T13.5: load extensions explicitly via `--no-extensions` + `--extension <abs-path>`.
+# This kills the "broken sibling extension poisons the harness" failure mode —
+# pi's auto-discovery is all-or-nothing; one syntax error elsewhere under
+# .pi/extensions/ means nothing loads. --no-extensions disables discovery
+# while --extension still loads the explicit paths we point at.
+HEXXU_EXTS=(
+  "$HEXXU_ROOT/.pi/extensions/hexxu-skills-sync"
+  "$HEXXU_ROOT/.pi/extensions/hexxu-telemetry"
+)
+
 # Run pi briefly in non-interactive mode. Returns when pi exits or after timeout.
 # Captures stdout+stderr to a log file.
 run_pi_brief() {
@@ -85,12 +95,16 @@ run_pi_brief() {
   shift
   local extra_env="${1:-}"  # e.g., "HEXXU_SKILLS_URL=bad-url HEXXU_SKILLS_STALENESS_S=0"
   shift 2>/dev/null || true
+  local ext_args=(--no-extensions)
+  for e in "${HEXXU_EXTS[@]}"; do
+    ext_args+=("--extension" "$e")
+  done
   (
     cd "$HEXXU_ROOT"
     if [ -n "$extra_env" ]; then
-      env $extra_env pi -p "test" --no-tools >"$logfile" 2>&1 &
+      env $extra_env pi -p "test" --no-tools "${ext_args[@]}" >"$logfile" 2>&1 &
     else
-      pi -p "test" --no-tools >"$logfile" 2>&1 &
+      pi -p "test" --no-tools "${ext_args[@]}" >"$logfile" 2>&1 &
     fi
     local pid=$!
     sleep 6
@@ -303,14 +317,14 @@ fi
 
 header "(d) sync resilience: cache survives a subsequent fetch failure"
 
-# We have a populated cache from (c). To force a fetch failure on the existing
-# cache (HEXXU_SKILLS_URL only affects fresh clones — `git fetch` reads the
-# remote URL from the cache's own .git/config), break the cache's origin URL.
-git -C "$SCRATCH/skills-cache" remote set-url origin https://nonexistent.invalid/repo.git
+# T13.1+T13.8 design change: every sync clones fresh from HEXXU_SKILLS_URL
+# and atomically swaps. To force a fetch-equivalent failure, point
+# HEXXU_SKILLS_URL at an unreachable host. Atomic publish never replaces the
+# existing cache on a clone failure, so the cached skills survive.
 sha_before=$(git -C "$SCRATCH/skills-cache" rev-parse HEAD 2>/dev/null || echo "BEFORE-UNKNOWN")
 skills_before=$(ls -d "$SCRATCH/mount/central"/*/ 2>/dev/null | wc -l | tr -d ' ')
 LOG="$LOG_DIR/d-fetch-fail.log"
-run_pi_brief "$LOG" "HEXXU_SKILLS_STALENESS_S=0"
+run_pi_brief "$LOG" "HEXXU_SKILLS_URL=https://nonexistent.invalid/repo.git HEXXU_SKILLS_STALENESS_S=0"
 sub "log: $LOG"
 
 sha_after=$(git -C "$SCRATCH/skills-cache" rev-parse HEAD 2>/dev/null || echo "AFTER-UNKNOWN")
@@ -383,6 +397,88 @@ print(skills.get('meeting-action-items', 0))
     fail "CLI skill aggregation wrong" "expected meeting-action-items=1, got $inv. Full output:
 $(cat "$SYN_OUT")"
   fi
+fi
+
+# ----- (g) HEXXU_SKILLS_BRANCH honored (T13.4) ---------------------------
+
+header "(g) HEXXU_SKILLS_BRANCH override is honored"
+
+reset_sync_state
+LOG="$LOG_DIR/g-branch.log"
+# Set an invalid branch name; clone should fail with a remote-branch-not-found error
+run_pi_brief "$LOG" "HEXXU_SKILLS_BRANCH=does-not-exist"
+sub "log: $LOG"
+
+if grep -qE 'branch.*does-not-exist|sync failed.*branch.*does-not-exist|sync failed' "$LOG"; then
+  pass "non-existent HEXXU_SKILLS_BRANCH triggers sync failure"
+else
+  fail "expected sync failure for bad branch" "$(grep hexxu-skills-sync "$LOG" || echo "no extension output")"
+fi
+
+if grep -qE 'cloning.*\(branch does-not-exist\)' "$LOG"; then
+  pass "branch override appears in clone-attempt log"
+else
+  fail "branch override did not appear in clone log" "$(grep -E 'cloning|branch' "$LOG" || echo "no log lines")"
+fi
+
+# ----- (h) Atomic mount swap doesn't strand workers (T13.7) -------------
+
+header "(h) ensureMount creates a symlink atomically (no missing-mount window)"
+
+reset_sync_state
+LOG="$LOG_DIR/h-mount-atomic.log"
+run_pi_brief "$LOG"
+
+# After successful sync, the mount should exist as a symlink (not as a real dir
+# or as a staging-name remnant)
+if [ -L "$SCRATCH/mount/central" ]; then
+  pass "mount is a symlink after sync"
+else
+  fail "mount is not a symlink after sync"
+fi
+# No staging tempnames left behind
+if ls "$SCRATCH/mount/central.staging-"* >/dev/null 2>&1; then
+  fail "staging symlink tempname left behind"
+else
+  pass "no orphaned staging tempnames"
+fi
+
+# ----- (i) Layout contract: SKILL_PATH_RE matches sync's output (T13.22) ---
+
+header "(i) SKILL.md layout matches what hexxu-telemetry's SKILL_PATH_RE expects"
+
+# After a successful sync the cache contains skills/<name>/SKILL.md files.
+# The telemetry extension's regex matches `(?:^|[\\/])skills[\\/]([^\\/]+)[\\/]SKILL\.md$`
+# Verify a real path from the cache matches.
+sample_path=$(find "$SCRATCH/skills-cache/skills" -maxdepth 2 -name SKILL.md -type f 2>/dev/null | head -1)
+if [ -n "$sample_path" ]; then
+  if python3 -c "
+import re, sys
+p = '$sample_path'
+m = re.search(r'(?:^|[\\\\/])skills[\\\\/]([^\\\\/]+)[\\\\/]SKILL\.md$', p, re.IGNORECASE)
+sys.exit(0 if m else 1)
+"; then
+    pass "real cache SKILL.md path matches telemetry SKILL_PATH_RE ($sample_path)"
+  else
+    fail "telemetry regex doesn't match cache layout" "sample: $sample_path"
+  fi
+else
+  fail "no SKILL.md in cache to test"
+fi
+
+# ----- (j) parsePositiveInt → parseNonNegativeInt rename verified (T13.13) -
+
+header "(j) telemetry parseNonNegativeInt name reflects behavior"
+
+if grep -q "parseNonNegativeInt" "$HEXXU_ROOT/.pi/extensions/hexxu-telemetry/index.ts"; then
+  pass "parseNonNegativeInt is present"
+else
+  fail "parseNonNegativeInt not found; rename did not land"
+fi
+if grep -q "parsePositiveInt" "$HEXXU_ROOT/.pi/extensions/hexxu-telemetry/index.ts"; then
+  fail "parsePositiveInt still present after rename"
+else
+  pass "parsePositiveInt fully renamed"
 fi
 
 # ----- (f) identity-drift CI gates a deliberate violation -----------------
