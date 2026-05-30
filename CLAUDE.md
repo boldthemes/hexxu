@@ -19,7 +19,7 @@ hexxu-skills repo for the seven design constraints and the A→B→C trajectory.
 | `.pi/sdk/skill-creator/` | Non-interactive skill-creation automation: run-evals, grade-iteration, compare-iteration, aggregate-benchmark, optimize-description, generate-review (consumed by `skill-creator` extension) |
 | `.pi/sdk/prompt-evals/` | Generic prompt eval harness (consumed by `.github/workflows/prompt-evals.yml`) |
 | `.pi/prompts/` | Worker prompt templates (`pr.md`, `cl.md`, `standup.md`, `wr.md`, `is.md`) |
-| `.pi/skills/` | Source for the five originally-authored skills, migrated to `boldthemes/hexxu-skills` via T6 grandfather migration |
+| `.pi/skills/` | **NOT TRACKED** (see `.gitignore`). Convention: a local symlink to a sibling `hexxu-skills/skills/` checkout, so pi running from this workspace picks up the live registry content. Canonical skill source-of-truth is `boldthemes/hexxu-skills`. See "Developer setup" below for the symlink convention. |
 | `cli/` | Worker CLI(s): `telemetry-summary` (T8) reads local hexxu-telemetry JSONL and prints a rollup |
 | `test/` | E2E acceptance harness (T10): `./test/e2e.sh` exercises the full sync+telemetry+CLI loop, plus `--ci` for live identity-drift gate verification |
 | `evals/prompts/` | Prompt eval cases consumed by `.pi/sdk/prompt-evals/` |
@@ -50,11 +50,25 @@ A future `hexxu` onboarding CLI will collapse this into one command (see
 Developers cloning hexxu to author skills, extensions, or SDK scripts:
 
 ```bash
+# Clone both repos as siblings (relative symlink convention)
 git clone git@github.com:boldthemes/hexxu.git
+git clone git@github.com:boldthemes/hexxu-skills.git
 cd hexxu
+
+# Project-local skills symlink. Pi loads from `.pi/skills/` when run from
+# this workspace. The symlink resolves to ../../hexxu-skills/skills so
+# you can author skills in the registry repo and see them live in pi
+# without going through the sync extension.
+ln -s ../../hexxu-skills/skills .pi/skills
+
 # Optional: clone pi-coding-agent for source reference
 git clone https://github.com/earendil-works/pi-coding-agent.git pisource
 ```
+
+The `.pi/skills` symlink is gitignored — it depends on the sibling
+checkout layout (`Development/hexxu`, `Development/hexxu-skills`). If
+you keep the two repos at different paths, point the symlink at your
+actual `hexxu-skills/skills` location.
 
 The `pisource/` clone is reference-only (already gitignored). Pi extension
 typings flow from the bundled `@earendil-works/pi-coding-agent` package

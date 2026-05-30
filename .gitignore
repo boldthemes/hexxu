@@ -74,3 +74,9 @@ plans/
 compaction-results/
 .opencode/
 .npm/
+
+# T14b: project-local skills symlink. The canonical skill registry lives at
+# boldthemes/hexxu-skills; this is a local symlink to a sibling hexxu-skills
+# checkout so pi running from this workspace picks up the live registry
+# content. Not tracked in this repo.
+.pi/skills
