@@ -12,7 +12,10 @@
  *   session_id      Pi's session id (ctx.sessionManager.getSessionId())
  *   skills_invoked  Array of { name, version }, deduped by name
  *   duration_ms     session end - session start in milliseconds
- *   exit_reason     "quit" | "reload" | "new" | "resume" | "fork"
+ *   exit_reason     pi's SessionShutdownEvent.reason — open-set string,
+ *                   currently "quit" | "reload" | "new" | "resume" | "fork"
+ *                   but pi may extend this set in future versions; we pass
+ *                   the value through verbatim for forward compatibility
  *
  * Optional fields the implementer (you, today) may add without breaking
  * forward compatibility: model, total_tokens, exit_code, custom_props, etc.
@@ -46,7 +49,9 @@ import {
 	mkdirSync,
 	openSync,
 	readFileSync,
+	renameSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 	writeSync,
 } from "node:fs";
@@ -64,8 +69,10 @@ const TAG = "hexxu-telemetry";
 const DEFAULT_MAX_BYTES = 50 * 1024 * 1024;
 const DEFAULT_MAX_DAYS = 90;
 const UUID_V4_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
-// Matches Read tool calls whose path ends in /<skill-name>/SKILL.md. Captures the skill-name dir.
-const SKILL_PATH_RE = /(?:^|[\\/])([^\\/]+)[\\/]SKILL\.md$/;
+// T13.12: SKILL.md must live under a "skills/" parent (e.g., `~/.pi/agent/skills/central/<name>/SKILL.md`
+// or a project-local `.pi/skills/<name>/SKILL.md`). The /skills/ segment scopes the match so unrelated
+// SKILL.md files elsewhere on disk don't get counted as skill invocations.
+const SKILL_PATH_RE = /(?:^|[\\/])skills[\\/]([^\\/]+)[\\/]SKILL\.md$/i;
 
 interface SessionState {
 	sessionId: string | null;
@@ -89,12 +96,16 @@ function readConfig(): Config {
 	const dir = process.env.HEXXU_TELEMETRY_DIR ?? join(home, ".hexxu", "telemetry");
 	const file = process.env.HEXXU_TELEMETRY_FILE ?? join(dir, "telemetry.jsonl");
 	const disabled = ["1", "true", "yes"].includes((process.env.HEXXU_TELEMETRY_DISABLED ?? "").toLowerCase());
-	const maxBytes = parsePositiveInt(process.env.HEXXU_TELEMETRY_MAX_BYTES, DEFAULT_MAX_BYTES);
-	const maxDays = parsePositiveInt(process.env.HEXXU_TELEMETRY_MAX_DAYS, DEFAULT_MAX_DAYS);
+	const maxBytes = parseNonNegativeInt(process.env.HEXXU_TELEMETRY_MAX_BYTES, DEFAULT_MAX_BYTES);
+	const maxDays = parseNonNegativeInt(process.env.HEXXU_TELEMETRY_MAX_DAYS, DEFAULT_MAX_DAYS);
 	return { dir, file, disabled, maxBytes, maxDays };
 }
 
-function parsePositiveInt(raw: string | undefined, fallback: number): number {
+// T13.13: name says "non-negative" because it accepts 0; rotation can be
+// effectively disabled by setting MAX_BYTES or MAX_DAYS to a huge number,
+// but setting it to 0 would rotate on every write which is a config error
+// the caller wants reported in the cfg, not silently substituted.
+function parseNonNegativeInt(raw: string | undefined, fallback: number): number {
 	if (raw === undefined || raw === "") return fallback;
 	const n = Number.parseInt(raw, 10);
 	return Number.isFinite(n) && n >= 0 ? n : fallback;
@@ -154,6 +165,14 @@ function readSkillVersion(skillMdPath: string): string | null {
 	}
 }
 
+// T13.9: rotation via atomic-rename-as-claim (no flockSync in node:fs).
+// Two concurrent pi sessions could both decide to rotate. The previous
+// design (readFileSync → writeFileSync(file, "")) could lose records: B
+// reads after A truncates, archiving an empty file; or both write to the
+// same archive name. Fix: rename(2) the active log to a private claim
+// name first. Only one process can win the rename — the loser gets ENOENT
+// and skips. Subsequent appenders (any session) open `file` with O_CREAT
+// and start a fresh log. No data is lost across the boundary.
 function maybeRotate(file: string, cfg: Config, ctx: ExtensionContext | undefined): void {
 	if (!existsSync(file)) return;
 	let st: ReturnType<typeof statSync>;
@@ -169,12 +188,11 @@ function maybeRotate(file: string, cfg: Config, ctx: ExtensionContext | undefine
 	const ageExceeded = ageDays > cfg.maxDays;
 	if (!sizeExceeded && !ageExceeded) return;
 
-	// Rotate: rename to telemetry-YYYY-MM-DD.jsonl.gz and start fresh
+	// Compute archive path (collision-resolved)
 	const isoDate = new Date(st.mtimeMs).toISOString().slice(0, 10);
 	const archiveBase = `telemetry-${isoDate}.jsonl`;
 	let archiveName = `${archiveBase}.gz`;
 	let archivePath = join(dirname(file), archiveName);
-	// Avoid collisions if rotation happens twice on the same date
 	let suffix = 1;
 	while (existsSync(archivePath)) {
 		suffix += 1;
@@ -182,22 +200,50 @@ function maybeRotate(file: string, cfg: Config, ctx: ExtensionContext | undefine
 		archivePath = join(dirname(file), archiveName);
 	}
 
+	// Atomic claim: rename the active log to a private name. If two pi sessions
+	// race here, only one's renameSync succeeds; the loser catches ENOENT and
+	// returns. POSIX rename(2) is atomic on the same filesystem.
+	const claimPath = `${file}.rotating-${process.pid}-${Date.now()}`;
 	try {
-		// 1. Read the current log
-		const data = readFileSync(file);
-		// 2. Gzip and write the archive (mode 0o600 from the start)
+		renameSync(file, claimPath);
+	} catch (e) {
+		const code = (e as NodeJS.ErrnoException).code;
+		if (code === "ENOENT") {
+			// Another process already claimed it. No-op.
+			return;
+		}
+		note(ctx, `rotation claim failed: ${errMessage(e)}; continuing to append to current file`, "warn");
+		return;
+	}
+
+	// We hold exclusive ownership of claimPath. Process it.
+	try {
+		const data = readFileSync(claimPath);
 		const gz = gzipSync(data);
 		writeFileSync(archivePath, gz, { mode: 0o600 });
-		// 3. Truncate the original so subsequent appends start fresh.
-		//    Single-process model = no concurrent writes during rotation.
-		writeFileSync(file, "", { mode: 0o600 });
+		try {
+			unlinkSync(claimPath);
+		} catch (e) {
+			// Archive written successfully; failing to unlink the claim is non-fatal
+			// (leftover will be cleaned by the next sync or the worker).
+			note(ctx, `archive written but could not unlink ${claimPath}: ${errMessage(e)}`, "warn");
+		}
 		const reason = sizeExceeded ? `size > ${cfg.maxBytes}B` : `age > ${cfg.maxDays}d`;
 		note(ctx, `rotated ${file} → ${archiveName} (${reason})`, "info");
 	} catch (e) {
-		// Rotation failed (most often: archive write permission). Leave the
-		// original file in place; the next append still works (mode might be
-		// outdated but data isn't lost).
-		note(ctx, `rotation failed (${errMessage(e)}); continuing to append to current file`, "warn");
+		// Archive write failed. Attempt to restore the claimed file so we don't
+		// lose data. Subsequent writes will go to the restored file.
+		try {
+			renameSync(claimPath, file);
+		} catch (e2) {
+			note(
+				ctx,
+				`rotation archive failed AND restore failed: ${errMessage(e)} / ${errMessage(e2)}; claim left at ${claimPath}`,
+				"error",
+			);
+			return;
+		}
+		note(ctx, `rotation failed (${errMessage(e)}); restored to active log, continuing`, "warn");
 	}
 }
 
@@ -246,9 +292,14 @@ export default function hexxuTelemetry(pi: ExtensionAPI): void {
 		state.sessionId = ctx.sessionManager.getSessionId() ?? null;
 		state.startMs = Date.now();
 		state.skills = new Map();
-		// Resolve worker_id lazily on shutdown so a late-set env var still works
 		state.workerId = null;
 		state.warnedNoWorkerId = false;
+		// T13.23: resolve worker_id eagerly at session_start. Constraint #7
+		// (identity rotation) says a new UUID = a new worker; resolving lazily at
+		// session_shutdown would cross-link an old-worker session with the new
+		// UUID if the worker rotated their HEXXU_WORKER_ID mid-session. Eager
+		// resolution binds the session to whoever owned identity at start.
+		readWorkerId(state, ctx);
 	});
 
 	pi.on("tool_execution_start", async (event) => {
@@ -301,9 +352,13 @@ export default function hexxuTelemetry(pi: ExtensionAPI): void {
 		description: "Show hexxu-telemetry state for the current session and on-disk log location",
 		handler: async (_args, ctx) => {
 			const cfg = readConfig();
+			// T13.14: resolve worker_id at call time so a late-set env var (or just
+			// the initial resolution failing during session_start when the shell env
+			// wasn't yet exported) shows up correctly.
+			readWorkerId(state, ctx);
 			const lines = [
 				`telemetry file: ${cfg.file}`,
-				`worker_id: ${state.workerId ?? "(not yet resolved)"}`,
+				`worker_id: ${state.workerId ?? "(unset)"}`,
 				`session_id: ${state.sessionId ?? "(none)"}`,
 				`skills invoked this session: ${state.skills.size}`,
 				`disabled: ${cfg.disabled}`,

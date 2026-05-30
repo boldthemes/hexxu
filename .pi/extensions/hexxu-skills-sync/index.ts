@@ -40,9 +40,9 @@
  * protection on the central repo, this is the layered defense).
  */
 
-import { existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 interface SyncState {
@@ -54,6 +54,7 @@ interface SyncState {
 
 interface SyncConfig {
 	url: string;
+	branch: string;
 	cacheDir: string;
 	mountPoint: string;
 	stalenessMs: number;
@@ -61,6 +62,7 @@ interface SyncConfig {
 }
 
 const DEFAULT_URL = "https://github.com/boldthemes/hexxu-skills.git";
+const DEFAULT_BRANCH = "main";
 const DEFAULT_STALENESS_SECONDS = 300;
 const TAG = "hexxu-skills-sync";
 
@@ -79,11 +81,30 @@ function readConfig(): SyncConfig {
 	}
 	return {
 		url: process.env.HEXXU_SKILLS_URL ?? DEFAULT_URL,
+		// T13.4: HEXXU_SKILLS_BRANCH lets you point at forks with non-main defaults
+		// without breaking sync. Defaults to 'main' for the boldthemes/hexxu-skills convention.
+		branch: process.env.HEXXU_SKILLS_BRANCH ?? DEFAULT_BRANCH,
 		cacheDir: process.env.HEXXU_SKILLS_CACHE_DIR ?? join(home, ".hexxu", "skills-cache"),
 		mountPoint: process.env.HEXXU_SKILLS_MOUNT ?? join(home, ".pi", "agent", "skills", "central"),
 		stalenessMs: stalenessSeconds * 1000,
 		disabled: ["1", "true", "yes"].includes((process.env.HEXXU_SKILLS_DISABLED ?? "").toLowerCase()),
 	};
+}
+
+// T13.19: refuse to operate if HEXXU_SKILLS_MOUNT is inside HEXXU_SKILLS_CACHE_DIR.
+// The atomic-publish swap would destroy the mount mid-flight, leaving pi with a
+// dangling symlink. Returns true if config is safe; false (with warn) if not.
+function validateConfig(cfg: SyncConfig, ctx: ExtensionContext | undefined): boolean {
+	const cacheWithSep = cfg.cacheDir.endsWith(sep) ? cfg.cacheDir : cfg.cacheDir + sep;
+	if (cfg.mountPoint === cfg.cacheDir || cfg.mountPoint.startsWith(cacheWithSep)) {
+		note(
+			ctx,
+			`misconfiguration: HEXXU_SKILLS_MOUNT (${cfg.mountPoint}) is inside HEXXU_SKILLS_CACHE_DIR (${cfg.cacheDir}); refusing to sync to avoid destroying the mount`,
+			"warn",
+		);
+		return false;
+	}
+	return true;
 }
 
 function stateFilePath(cacheDir: string): string {
@@ -127,6 +148,10 @@ function note(ctx: ExtensionContext | undefined, msg: string, level: "info" | "w
 	process.stderr.write(`${line}\n`);
 }
 
+// T13.7: atomic symlink swap. The original lstatSync → unlinkSync → symlinkSync
+// sequence has a TOCTOU window: between unlinkSync and symlinkSync, another
+// pi session sees the mount point missing. POSIX rename(2) on a symlink is
+// atomic — write a fresh symlink to a temp name, then rename it into place.
 function ensureMount(cacheDir: string, mountPoint: string, ctx: ExtensionContext | undefined): boolean {
 	const cacheSkills = join(cacheDir, "skills");
 	if (!existsSync(cacheSkills)) {
@@ -141,6 +166,8 @@ function ensureMount(cacheDir: string, mountPoint: string, ctx: ExtensionContext
 		return false;
 	}
 
+	// Refuse to overwrite a real directory/file at the mount point. Workers with
+	// pre-existing skill content should move/rename it before enabling central sync.
 	if (existsSync(mountPoint)) {
 		let isSymlink = false;
 		try {
@@ -150,7 +177,6 @@ function ensureMount(cacheDir: string, mountPoint: string, ctx: ExtensionContext
 			return false;
 		}
 		if (!isSymlink) {
-			// Real directory or file with worker-local content — do NOT destroy
 			note(
 				ctx,
 				`mount ${mountPoint} exists and is not a symlink; not overwriting. Move/rename it to enable central sync.`,
@@ -158,21 +184,49 @@ function ensureMount(cacheDir: string, mountPoint: string, ctx: ExtensionContext
 			);
 			return false;
 		}
-		// Existing symlink — replace to re-point at the current cache
-		try {
-			unlinkSync(mountPoint);
-		} catch (e) {
-			note(ctx, `cannot replace existing symlink ${mountPoint}: ${errMessage(e)}`, "warn");
-			return false;
-		}
 	}
 
+	// Atomic swap: create the new symlink at a temp name, then rename it onto
+	// the mount point. rename(2) is atomic for symlinks on POSIX filesystems.
+	// Tempname includes pid to avoid collisions if two pi sessions run concurrently.
+	const tempLink = `${mountPoint}.staging-${process.pid}`;
 	try {
-		symlinkSync(cacheSkills, mountPoint, "dir");
+		if (existsSync(tempLink)) unlinkSync(tempLink);
+	} catch {
+		/* not fatal */
+	}
+	try {
+		symlinkSync(cacheSkills, tempLink, "dir");
+	} catch (e) {
+		note(ctx, `cannot create staging symlink ${tempLink}: ${errMessage(e)}`, "warn");
+		return false;
+	}
+	try {
+		renameSync(tempLink, mountPoint);
 		return true;
 	} catch (e) {
-		note(ctx, `cannot create symlink ${mountPoint} -> ${cacheSkills}: ${errMessage(e)}`, "warn");
+		note(ctx, `cannot atomically swap mount ${mountPoint}: ${errMessage(e)}`, "warn");
+		try {
+			unlinkSync(tempLink);
+		} catch {
+			/* best effort cleanup */
+		}
 		return false;
+	}
+}
+
+// T13.8: atomic cache publish helper. Removes any leftover staging/old dirs
+// from a previous failed sync. Best-effort; logs warnings but doesn't fail.
+function cleanupStagingDirs(cacheDir: string, ctx: ExtensionContext | undefined): void {
+	for (const suffix of [".staging", ".old"]) {
+		const path = `${cacheDir}${suffix}`;
+		if (existsSync(path)) {
+			try {
+				rmSync(path, { recursive: true, force: true });
+			} catch (e) {
+				note(ctx, `could not clean up leftover ${path}: ${errMessage(e)}`, "warn");
+			}
+		}
 	}
 }
 
@@ -182,6 +236,9 @@ async function performSync(pi: ExtensionAPI, ctx: ExtensionContext | undefined, 
 		note(ctx, "disabled via HEXXU_SKILLS_DISABLED; skipping", "info");
 		return;
 	}
+
+	// T13.19: refuse to sync if mount lives inside cache
+	if (!validateConfig(cfg, ctx)) return;
 
 	const stateFile = stateFilePath(cfg.cacheDir);
 	const state = readState(stateFile);
@@ -201,37 +258,42 @@ async function performSync(pi: ExtensionAPI, ctx: ExtensionContext | undefined, 
 		}
 	}
 
+	// T13.1+T13.8 unified design: every sync is a full shallow clone to a staging
+	// dir, followed by an atomic rename swap. This kills three bugs at once:
+	//   (1) URL drift — HEXXU_SKILLS_URL changes always take effect on the next
+	//       sync because we never reuse the cache's embedded origin
+	//   (2) In-place git reset --hard racing concurrent readers — atomic dir
+	//       rename publishes the new cache without ever mutating the old in place
+	//   (3) The cache+branch combination always matches the current config; no
+	//       drift detection plumbing needed
+	// Cost: a fresh shallow clone instead of fetch on every non-skipped sync.
+	// hexxu-skills is small (KB-scale) so this is a no-op.
+	const stagingDir = `${cfg.cacheDir}.staging`;
+	const oldDir = `${cfg.cacheDir}.old`;
 	const isFirstSync = !existsSync(cfg.cacheDir);
-	let exitCode = 0;
-	let stderrTail = "";
 	let headSha = state?.head_sha;
 
-	if (isFirstSync) {
-		note(ctx, `cold-start: cloning ${cfg.url} into ${cfg.cacheDir}`, "info");
-		try {
-			mkdirSync(dirname(cfg.cacheDir), { recursive: true });
-		} catch (e) {
-			note(ctx, `cannot create cache parent ${dirname(cfg.cacheDir)}: ${errMessage(e)}`, "warn");
-			return;
-		}
-		const r = await pi.exec("git", ["clone", "--depth", "1", "--branch", "main", cfg.url, cfg.cacheDir]);
-		exitCode = r.code;
-		stderrTail = r.stderr;
-	} else {
-		const fetched = await pi.exec("git", ["-C", cfg.cacheDir, "fetch", "--depth", "1", "origin", "main"]);
-		if (fetched.code !== 0) {
-			exitCode = fetched.code;
-			stderrTail = fetched.stderr;
-		} else {
-			const reset = await pi.exec("git", ["-C", cfg.cacheDir, "reset", "--hard", "FETCH_HEAD"]);
-			exitCode = reset.code;
-			stderrTail = reset.stderr;
-		}
+	// Clean up any leftover from a prior crashed/killed sync
+	cleanupStagingDirs(cfg.cacheDir, ctx);
+
+	try {
+		mkdirSync(dirname(cfg.cacheDir), { recursive: true });
+	} catch (e) {
+		note(ctx, `cannot create cache parent ${dirname(cfg.cacheDir)}: ${errMessage(e)}`, "warn");
+		return;
 	}
 
-	if (exitCode !== 0) {
+	note(
+		ctx,
+		isFirstSync
+			? `cold-start: cloning ${cfg.url} (branch ${cfg.branch}) into ${cfg.cacheDir}`
+			: `sync: cloning ${cfg.url} (branch ${cfg.branch}) into staging`,
+		"info",
+	);
+	const cloneRes = await pi.exec("git", ["clone", "--depth", "1", "--branch", cfg.branch, cfg.url, stagingDir]);
+	if (cloneRes.code !== 0) {
 		const failMsg =
-			stderrTail.trim().split("\n").slice(0, 3).join(" | ").slice(0, 400) || "git failed with no stderr output";
+			cloneRes.stderr.trim().split("\n").slice(0, 3).join(" | ").slice(0, 400) || "git clone failed with no stderr";
 		note(ctx, `sync failed: ${failMsg}`, "warn");
 		writeState(stateFile, {
 			last_sync_at: Date.now(),
@@ -239,6 +301,8 @@ async function performSync(pi: ExtensionAPI, ctx: ExtensionContext | undefined, 
 			last_sync_message: failMsg,
 			head_sha: headSha,
 		});
+		// Clean up the failed staging dir
+		cleanupStagingDirs(cfg.cacheDir, ctx);
 		if (isFirstSync) {
 			note(ctx, "cold-start failed; starting with no central skills (fail-open per constraint #5)", "warn");
 		}
@@ -247,32 +311,71 @@ async function performSync(pi: ExtensionAPI, ctx: ExtensionContext | undefined, 
 		return;
 	}
 
-	// Capture HEAD SHA
-	const shaResult = await pi.exec("git", ["-C", cfg.cacheDir, "rev-parse", "HEAD"]);
+	// Capture HEAD SHA from the staging clone
+	const shaResult = await pi.exec("git", ["-C", stagingDir, "rev-parse", "HEAD"]);
 	if (shaResult.code === 0) {
 		headSha = shaResult.stdout.trim();
 	}
 
+	// Atomic publish: rename existing cache aside, then promote staging to cache.
+	// On any rename failure, roll back.
+	try {
+		if (existsSync(cfg.cacheDir)) {
+			renameSync(cfg.cacheDir, oldDir);
+		}
+		renameSync(stagingDir, cfg.cacheDir);
+	} catch (e) {
+		note(ctx, `atomic cache swap failed: ${errMessage(e)}; attempting rollback`, "warn");
+		// Roll back: if cacheDir is now missing but oldDir exists, restore oldDir.
+		if (!existsSync(cfg.cacheDir) && existsSync(oldDir)) {
+			try {
+				renameSync(oldDir, cfg.cacheDir);
+			} catch (e2) {
+				note(ctx, `rollback failed: ${errMessage(e2)}; cache is in inconsistent state`, "error");
+			}
+		}
+		writeState(stateFile, {
+			last_sync_at: Date.now(),
+			last_sync_status: "failure",
+			last_sync_message: `swap failed: ${errMessage(e)}`,
+			head_sha: state?.head_sha,
+		});
+		return;
+	}
+
+	// Successful swap. GC the old cache. Open file descriptors in concurrent
+	// readers survive the directory unlink, so this is safe.
+	if (existsSync(oldDir)) {
+		try {
+			rmSync(oldDir, { recursive: true, force: true });
+		} catch (e) {
+			// Non-fatal; leftover will be cleaned on next sync via cleanupStagingDirs
+			note(ctx, `could not GC old cache ${oldDir}: ${errMessage(e)}`, "warn");
+		}
+	}
+
 	// Mount the central skills into pi's skills dir.
-	// If the cache has no `skills/` subdir, that's expected during bootstrap
-	// (the central registry hasn't received T6's grandfather migration yet) —
-	// log as info, not warn. Any other mount failure is a real warning.
 	const cacheSkillsDir = join(cfg.cacheDir, "skills");
 	const mounted = ensureMount(cfg.cacheDir, cfg.mountPoint, ctx);
 	if (!mounted) {
 		if (!existsSync(cacheSkillsDir)) {
 			note(ctx, "registry has no skills/ directory yet (expected during bootstrap)", "info");
 		} else {
-			note(ctx, "fetched but couldn't mount; central skills not visible to pi until next session", "warn");
+			note(ctx, "synced but couldn't mount; central skills not visible to pi until next session", "warn");
 		}
 	}
 
-	// Count skills in the cache for the success message
-	const countResult = await pi.exec("sh", [
-		"-c",
-		`find "${join(cfg.cacheDir, "skills")}" -maxdepth 2 -name SKILL.md -type f 2>/dev/null | wc -l`,
-	]);
-	const skillCount = Number.parseInt(countResult.stdout.trim() || "0", 10) || 0;
+	// T13.2: count skills via direct pi.exec("find", ...) — no shell, no injection
+	const skillsDir = join(cfg.cacheDir, "skills");
+	let skillCount = 0;
+	if (existsSync(skillsDir)) {
+		const countResult = await pi.exec("find", [skillsDir, "-maxdepth", "2", "-name", "SKILL.md", "-type", "f"]);
+		if (countResult.code === 0) {
+			skillCount = countResult.stdout
+				.split("\n")
+				.filter((l) => l.trim().length > 0).length;
+		}
+	}
 	const shaShort = headSha?.substring(0, 7) ?? "?";
 
 	const msg = `synced ${skillCount} skill${skillCount === 1 ? "" : "s"} @ ${shaShort}`;
