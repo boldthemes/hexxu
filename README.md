@@ -12,7 +12,7 @@ Paired with [hexxu-skills](https://github.com/boldthemes/hexxu-skills) — worke
 | `.pi/sdk/skill-creator/` | Non-interactive automation for skill creation: run-evals, grade-iteration, compare-iteration, aggregate-benchmark, optimize-description, generate-review |
 | `.pi/sdk/prompt-evals/` | Generic prompt eval harness; CI runs via `.github/workflows/prompt-evals.yml` |
 | `.pi/prompts/` | Worker prompt templates (`pr`, `cl`, `standup`, `wr`, `is`) |
-| `.pi/skills/` | Source for the five originally-authored skills, migrated to `hexxu-skills` |
+| `.pi/skills/` | **NOT TRACKED** — gitignored symlink to a local `hexxu-skills/skills/` checkout. Skills source-of-truth is [boldthemes/hexxu-skills](https://github.com/boldthemes/hexxu-skills). See "Install (developer)" below for the symlink convention. |
 | `cli/` | Worker CLI: `hexxu-telemetry-summary` reads local JSONL and prints a per-skill rollup |
 | `test/` | E2E harness exercising sync + telemetry + CLI + identity-drift CI |
 
@@ -31,11 +31,22 @@ A future `hexxu` onboarding CLI ([hexxu-skills TODO #4](https://github.com/boldt
 ## Install (developer)
 
 ```bash
+# Clone both repos as siblings (relative symlink convention)
 git clone git@github.com:boldthemes/hexxu.git
+git clone git@github.com:boldthemes/hexxu-skills.git
 cd hexxu
+
+# Project-local skills symlink (gitignored). Pi running from this workspace
+# picks up the live skill registry content from your hexxu-skills checkout.
+ln -s ../../hexxu-skills/skills .pi/skills
+
 # Optional: clone pi-coding-agent as a reference (gitignored)
 git clone https://github.com/earendil-works/pi-coding-agent.git pisource
 ```
+
+The `.pi/skills` symlink depends on the sibling layout. If you keep your
+hexxu-skills checkout at a different path, point the symlink at your
+actual location.
 
 Read [CLAUDE.md](CLAUDE.md) for the full developer layout.
 
