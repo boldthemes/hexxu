@@ -258,6 +258,11 @@ function writeJsonlRecord(file: string, cfg: Config, record: object, ctx: Extens
 	maybeRotate(file, cfg, ctx);
 
 	// O_WRONLY | O_CREAT | O_APPEND. Mode 0o600 on create.
+	// NOTE (Windows): 0o600 is a near-no-op on NTFS — Node only maps it to the
+	// read-only attribute, not an owner-only ACL. On Windows worker desktops the
+	// privacy guarantee instead rides on the per-user %USERPROFILE% ACL (the file
+	// lives under ~/.hexxu, inside the user's profile). Single-user desktops only;
+	// see docs/onboarding.md. POSIX hosts get the real owner-only mode.
 	let fd: number | null = null;
 	try {
 		fd = openSync(file, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_APPEND, 0o600);
