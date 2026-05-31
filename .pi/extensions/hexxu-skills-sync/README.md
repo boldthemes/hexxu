@@ -51,7 +51,9 @@ On every pi `session_start`:
 3. Else: `git clone --depth 1` (cold-start) or `git fetch + reset --hard
    FETCH_HEAD` (incremental).
 4. On success: symlink `cacheDir/skills` into `~/.pi/agent/skills/central` so
-   pi's skill loader sees them on the next session.
+   pi's skill loader sees them on the next session. On Windows this is a
+   directory **junction** (no Admin/Developer Mode needed); POSIX uses a
+   symlink with an atomic rename-swap.
 5. Persist last sync status to `~/.hexxu/skills-sync-state.json`.
 
 The sync runs **async** so it never blocks the session start. Failures WARN to
@@ -93,7 +95,7 @@ also drop the sync history.
 | Cold-start + GitHub unreachable | Warn; no skills; fail-open per constraint #5 |
 | Cold-start + central repo has no `skills/` dir | Info (not warn): "registry has no skills/ directory yet" — expected during T1-T5 bootstrap before T6 lands |
 | Incremental + GitHub unreachable | Warn; keep last cached skills mounted |
-| Mount point exists as real dir (not symlink) | Warn; do NOT destroy worker-local content; leave mount alone |
+| Mount point exists as real dir (not symlink/junction) | Warn; do NOT destroy worker-local content; leave mount alone |
 | State file corrupted | Treat as no state; full sync next run |
 
 ## How this defends against prompt injection (Risk #6)

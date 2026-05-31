@@ -67,7 +67,10 @@ All optional.
 ## File semantics
 
 - **Path:** `~/.hexxu/telemetry/telemetry.jsonl` (by default)
-- **Mode:** `0o600` on create, asserted on every write
+- **Mode:** `0o600` on create, asserted on every write (POSIX/WSL). On
+  native Windows / Git Bash the mode is a no-op on NTFS — privacy instead
+  rides on the per-user `%USERPROFILE%` ACL, since the log lives under
+  `~/.hexxu`. Single-user desktops only; use WSL for a hard owner-only mode.
 - **Append safety:** opened with `O_WRONLY | O_CREAT | O_APPEND`; record size << 4 KB so POSIX guarantees line-atomic appends across concurrent pi sessions on the same machine
 - **Rotation:** at write time, if size > `MAX_BYTES` OR mtime older than `MAX_DAYS` days, the active file is gzipped to `telemetry-YYYY-MM-DD.jsonl.gz` and the original is truncated. Single-process model = no concurrent-write race.
 
@@ -116,7 +119,9 @@ signal of "skill engaged" today.
 ## Privacy posture
 
 - **Local-only by default.** No outbound network calls. No upload. The file
-  lives in `~/.hexxu/telemetry/` on the worker's machine, mode 0600.
+  lives in `~/.hexxu/telemetry/` on the worker's machine, mode 0600 on
+  POSIX/WSL (on native Windows / Git Bash the mode is a no-op; the
+  `%USERPROFILE%` ACL scopes access — see "File semantics").
 - **Worker_id is the raw UUID**, not a hash. The CEO plan explicitly chose
   raw UUID + local-only as the privacy boundary (Risk #4): the UUID is
   meaningless without the worker's owned mapping; hashing it would prevent

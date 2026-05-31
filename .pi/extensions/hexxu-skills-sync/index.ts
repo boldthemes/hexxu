@@ -40,7 +40,7 @@
  * protection on the central repo, this is the layered defense).
  */
 
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -186,7 +186,26 @@ function ensureMount(cacheDir: string, mountPoint: string, ctx: ExtensionContext
 		}
 	}
 
-	// Atomic swap: create the new symlink at a temp name, then rename it onto
+	// Windows: plain "dir" symlinks need elevation (SeCreateSymbolicLinkPrivilege),
+	// which worker desktops don't have. Junctions point at a dir without elevation.
+	// rename(2)'s atomic-replace semantics also don't hold for directory reparse
+	// points here, so we remove any existing junction (the guard above proved the
+	// mount is a reparse point) and create the new one in place. The brief gap is
+	// acceptable: a worker desktop runs a single pi session, so there's no
+	// concurrent reader to observe it. rmdirSync on a junction removes only the
+	// link, never the target's contents.
+	if (process.platform === "win32") {
+		try {
+			if (existsSync(mountPoint)) rmdirSync(mountPoint);
+			symlinkSync(cacheSkills, mountPoint, "junction");
+			return true;
+		} catch (e) {
+			note(ctx, `cannot create junction mount ${mountPoint}: ${errMessage(e)}`, "warn");
+			return false;
+		}
+	}
+
+	// POSIX atomic swap: create the new symlink at a temp name, then rename it onto
 	// the mount point. rename(2) is atomic for symlinks on POSIX filesystems.
 	// Tempname includes pid to avoid collisions if two pi sessions run concurrently.
 	const tempLink = `${mountPoint}.staging-${process.pid}`;
